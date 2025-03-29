@@ -117,23 +117,35 @@ namespace GameSaveSync {
                 foreach (var local in localFiles) {
                     var localPath = Path.Combine(pair.LocalPath, local.Key);
                     var remotePath = $"{pair.RemotePath}/{local.Key}";
+                    var localTime = local.Value.ModifiedTime.TruncateToSeconds();
 
                     if (!remoteFiles.ContainsKey(local.Key)) {
                         syncActions.Add(("Upload", localPath, remotePath, local.Value.Size));
-                    } else if (local.Value.ModifiedTime > remoteFiles[local.Key].ModifiedTime) {
-                        syncActions.Add(("Upload", localPath, remotePath, local.Value.Size));
+                        Console.WriteLine($"Will upload {local.Key} (missing in cloud)");
+                    } else {
+                        var remoteTime = remoteFiles[local.Key].ModifiedTime.TruncateToSeconds();
+                        if (localTime > remoteTime) {
+                            syncActions.Add(("Upload", localPath, remotePath, local.Value.Size));
+                            Console.WriteLine($"Will upload {local.Key} (local newer: {localTime} vs cloud {remoteTime})");
+                        } else if (remoteTime > localTime) {
+                            syncActions.Add(("Download", localPath, remotePath, remoteFiles[local.Key].Size));
+                            Console.WriteLine($"Will download {local.Key} (cloud newer: {remoteTime} vs local {localTime})");
+                        } else {
+                            Console.WriteLine($"Skipping {local.Key} (timestamps match: {localTime})");
+                        }
                     }
                 }
 
                 foreach (var remote in remoteFiles) {
                     var localPath = Path.Combine(pair.LocalPath, remote.Key);
                     var remotePath = $"{pair.RemotePath}/{remote.Key}";
+                    var remoteTime = remote.Value.ModifiedTime.TruncateToSeconds();
 
                     if (!localFiles.ContainsKey(remote.Key)) {
                         syncActions.Add(("Download", localPath, remotePath, remote.Value.Size));
-                    } else if (remote.Value.ModifiedTime > localFiles[remote.Key].ModifiedTime) {
-                        syncActions.Add(("Download", localPath, remotePath, remote.Value.Size));
+                        Console.WriteLine($"Will download {remote.Key} (missing locally)");
                     }
+                    // Note: We already handled newer remote files in the local loop, so no else here
                 }
             }
 
@@ -148,7 +160,7 @@ namespace GameSaveSync {
 
             foreach (var action in syncActions) {
                 if (action.Action == "Upload")
-                    await _provider.UploadFileAsync(action.LocalPath, action.RemotePath); // Use full remote path
+                    await _provider.UploadFileAsync(action.LocalPath, action.RemotePath);
                 else if (action.Action == "Download")
                     await _provider.DownloadFileAsync(action.RemotePath, action.LocalPath);
 
@@ -163,6 +175,13 @@ namespace GameSaveSync {
                 Console.WriteLine($"Data: {bytesMB:F2}/{totalMB:F2} MB synced ({bytesPercent:F1}%)");
                 Console.WriteLine();
             }
+        }
+    }
+
+    // Extension method to truncate DateTime to seconds
+    public static class DateTimeExtensions {
+        public static DateTime TruncateToSeconds(this DateTime dt) {
+            return new DateTime(dt.Ticks - (dt.Ticks % TimeSpan.TicksPerSecond), dt.Kind);
         }
     }
 

@@ -12,6 +12,10 @@ Example config.json
     {
       "localPath": "E:\\GOG Galaxy\\Games\\HoMM 2 Gold\\cloud_saves\\GAMES",
       "remotePath": "/GameSaves/HoMM2"
+    },
+    {
+      "localPath": "C:\\RetroArch-Win64\\saves",
+      "remotePath": "/GameSaves/RetroArch"
     }
   ],
   "cloudProvider": "Dropbox",
