@@ -49,26 +49,30 @@ namespace GameSaveSync {
                 var list = await _client.Files.ListFolderAsync(remotePath, recursive: true);
                 foreach (var entry in list.Entries.Where(e => e.IsFile)) {
                     var file = entry.AsFile;
-                    var timestamp = file.ServerModified.ToUniversalTime();
+                    var serverTimestamp = file.ServerModified.ToUniversalTime();
                     var parsedTimestamp = ParseTimestampFromFilename(file.Name);
-                    if (parsedTimestamp.HasValue) {
-                        Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {timestamp:yyyy-MM-dd HH:mm:ss}, Parsed from filename: {parsedTimestamp.Value:yyyy-MM-dd HH:mm:ss}");
-                    }
+                    var timestamp = parsedTimestamp ?? serverTimestamp; // Use parsed timestamp if available, otherwise server timestamp
                     var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
                     files[relativePath] = (timestamp, (long)file.Size);
+
+                    Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {serverTimestamp:yyyy-MM-dd HH:mm:ss}, " +
+                                     $"Parsed from filename: {(parsedTimestamp.HasValue ? parsedTimestamp.Value.ToString("yyyy-MM-dd HH:mm:ss") : "N/A")}, " +
+                                     $"Using: {timestamp:yyyy-MM-dd HH:mm:ss}");
                 }
 
                 while (list.HasMore) {
                     list = await _client.Files.ListFolderContinueAsync(list.Cursor);
                     foreach (var entry in list.Entries.Where(e => e.IsFile)) {
                         var file = entry.AsFile;
-                        var timestamp = file.ServerModified.ToUniversalTime();
+                        var serverTimestamp = file.ServerModified.ToUniversalTime();
                         var parsedTimestamp = ParseTimestampFromFilename(file.Name);
-                        if (parsedTimestamp.HasValue) {
-                            Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {timestamp:yyyy-MM-dd HH:mm:ss}, Parsed from filename: {parsedTimestamp.Value:yyyy-MM-dd HH:mm:ss}");
-                        }
+                        var timestamp = parsedTimestamp ?? serverTimestamp;
                         var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
                         files[relativePath] = (timestamp, (long)file.Size);
+
+                        Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {serverTimestamp:yyyy-MM-dd HH:mm:ss}, " +
+                                         $"Parsed from filename: {(parsedTimestamp.HasValue ? parsedTimestamp.Value.ToString("yyyy-MM-dd HH:mm:ss") : "N/A")}, " +
+                                         $"Using: {timestamp:yyyy-MM-dd HH:mm:ss}");
                     }
                 }
                 return files;
@@ -171,6 +175,9 @@ namespace GameSaveSync {
                     var localTime = local.Value.ModifiedTime.TruncateToSeconds();
                     var remoteFilename = $"{localTime:yyyyMMdd_HHmmss}_{Path.GetFileName(local.Key)}";
                     var relativeDir = Path.GetDirectoryName(local.Key);
+                    if (relativeDir != "") {
+                        var tempA = "";
+                    }
                     var remotePath = string.IsNullOrEmpty(relativeDir)
                         ? $"{pair.RemotePath}/{remoteFilename}"
                         : $"{pair.RemotePath}/{relativeDir}/{remoteFilename}";
