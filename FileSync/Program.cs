@@ -12,9 +12,9 @@ namespace GameSaveSync {
     public class Config {
         public List<SyncPair> SyncPairs { get; set; } = new List<SyncPair>();
         public string CloudProvider { get; set; } = string.Empty;
-        public string Credentials { get; set; } = string.Empty; // Short-lived access token
-        public string RefreshToken { get; set; } = string.Empty; // Long-lived refresh token
-        public string AppKey { get; set; } = string.Empty; // Add these for refresh
+        public string Credentials { get; set; } = string.Empty;
+        public string RefreshToken { get; set; } = string.Empty;
+        public string AppKey { get; set; } = string.Empty;
         public string AppSecret { get; set; } = string.Empty;
     }
 
@@ -43,7 +43,7 @@ namespace GameSaveSync {
             _refreshToken = refreshToken;
             _appKey = appKey;
             _appSecret = appSecret;
-            _tokenExpiration = DateTime.UtcNow.AddHours(4); // Assume 4-hour lifespan
+            _tokenExpiration = DateTime.UtcNow.AddHours(4);
             _client = new DropboxClient(_accessToken);
         }
 
@@ -58,6 +58,7 @@ namespace GameSaveSync {
                     new KeyValuePair<string, string>("client_id", _appKey),
                     new KeyValuePair<string, string>("client_secret", _appSecret)
                 });
+                request.Content = content;
                 var response = await httpClient.SendAsync(request);
                 response.EnsureSuccessStatusCode();
                 var json = await response.Content.ReadAsStringAsync();
@@ -89,10 +90,7 @@ namespace GameSaveSync {
         public async Task UploadFileAsync(string localPath, string remotePath) {
             await RefreshAccessTokenAsync();
             try {
-                var localModified = File.GetLastWriteTimeUtc(localPath);
-                var filename = Path.GetFileName(localPath);
-                var timestampedFilename = $"{localModified:yyyyMMdd_HHmmss}_{filename}";
-                var normalizedRemotePath = $"{remotePath.Replace('\\', '/')}/{timestampedFilename}";
+                var normalizedRemotePath = remotePath.Replace('\\', '/');
                 using var stream = new FileStream(localPath, FileMode.Open, FileAccess.Read);
                 await _client.Files.UploadAsync(normalizedRemotePath, body: stream);
                 Console.WriteLine($"Uploaded {localPath} to {normalizedRemotePath}");
@@ -108,7 +106,7 @@ namespace GameSaveSync {
                 using var response = await _client.Files.DownloadAsync(normalizedRemotePath);
                 var cloudFilename = Path.GetFileName(normalizedRemotePath);
                 var timestamp = ParseTimestampFromFilename(cloudFilename) ?? response.Response.ServerModified.ToUniversalTime();
-                var originalFilename = StripTimestampFromFilename(cloudFilename);
+                var originalFilename = SyncManager.StripTimestampFromFilename(cloudFilename);
                 var finalLocalPath = Path.Combine(Path.GetDirectoryName(localPath), originalFilename);
 
                 using var stream = await response.GetContentAsStreamAsync();
@@ -143,11 +141,7 @@ namespace GameSaveSync {
             return null;
         }
 
-        private static string StripTimestampFromFilename(string filename) {
-            if (filename.Length > 15 && filename[8] == '_' && filename[15] == '_')
-                return filename.Substring(16);
-            return filename;
-        }
+        
     }
 
     public class SyncManager {
@@ -167,7 +161,7 @@ namespace GameSaveSync {
 
         public static string StripTimestampFromFilename(string filename) {
             if (filename.Length > 15 && filename[8] == '_' && filename[15] == '_')
-                return filename.Substring(16); // Remove yyyyMMdd_HHmmss_
+                return filename.Substring(16);
             return filename;
         }
 
@@ -191,16 +185,20 @@ namespace GameSaveSync {
                     var remoteFilename = $"{localTime:yyyyMMdd_HHmmss}_{local.Key}";
                     var remotePath = $"{pair.RemotePath}/{remoteFilename}";
 
-                    if (!remoteFiles.ContainsKey(remoteFilename)) {
+                    var matchingCloudFile = remoteFiles.Keys
+                        .Where(k => StripTimestampFromFilename(k).Equals(local.Key, StringComparison.OrdinalIgnoreCase))
+                        .FirstOrDefault();
+
+                    if (matchingCloudFile == null) {
                         syncActions.Add(("Upload", localPath, remotePath, local.Value.Size));
                         Console.WriteLine($"Will upload {local.Key} (missing in cloud)");
                     } else {
-                        var remoteTime = remoteFiles[remoteFilename].ModifiedTime.TruncateToSeconds();
+                        var remoteTime = remoteFiles[matchingCloudFile].ModifiedTime.TruncateToSeconds();
                         if (localTime > remoteTime) {
                             syncActions.Add(("Upload", localPath, remotePath, local.Value.Size));
                             Console.WriteLine($"Will upload {local.Key} (local newer: {localTime} vs cloud {remoteTime})");
                         } else if (remoteTime > localTime) {
-                            syncActions.Add(("Download", localPath, remotePath, remoteFiles[remoteFilename].Size));
+                            syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{matchingCloudFile}", remoteFiles[matchingCloudFile].Size));
                             Console.WriteLine($"Will download {local.Key} (cloud newer: {remoteTime} vs local {localTime})");
                         } else {
                             Console.WriteLine($"Skipping {local.Key} (timestamps match: {localTime})");
