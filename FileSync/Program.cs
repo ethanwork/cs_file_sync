@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Net.Http;
 using System.Text.Json;
 using System.Threading.Tasks;
 using Dropbox.Api;
@@ -12,7 +11,7 @@ namespace GameSaveSync {
     public class Config {
         public List<SyncPair> SyncPairs { get; set; } = new List<SyncPair>();
         public string CloudProvider { get; set; } = string.Empty;
-        public string Credentials { get; set; } = string.Empty;
+        public string Credentials { get; set; } = string.Empty; // Optional, only needed if not using refresh token initially
         public string RefreshToken { get; set; } = string.Empty;
         public string AppKey { get; set; } = string.Empty;
         public string AppSecret { get; set; } = string.Empty;
@@ -31,47 +30,20 @@ namespace GameSaveSync {
     }
 
     public class DropboxStorageProvider : ICloudStorageProvider {
-        private DropboxClient _client;
-        private readonly string _appKey;
-        private readonly string _appSecret;
-        private string _accessToken;
-        private readonly string _refreshToken;
-        private DateTime _tokenExpiration;
+        private readonly DropboxClient _client;
 
         public DropboxStorageProvider(string accessToken, string refreshToken, string appKey, string appSecret) {
-            _accessToken = accessToken;
-            _refreshToken = refreshToken;
-            _appKey = appKey;
-            _appSecret = appSecret;
-            _tokenExpiration = DateTime.UtcNow.AddHours(4);
-            _client = new DropboxClient(_accessToken);
-        }
-
-        private async Task RefreshAccessTokenAsync() {
-            if (DateTime.UtcNow >= _tokenExpiration) {
-                using var httpClient = new HttpClient();
-                var request = new HttpRequestMessage(HttpMethod.Post, "https://api.dropbox.com/oauth2/token");
-                var content = new FormUrlEncodedContent(new[]
-                {
-                    new KeyValuePair<string, string>("grant_type", "refresh_token"),
-                    new KeyValuePair<string, string>("refresh_token", _refreshToken),
-                    new KeyValuePair<string, string>("client_id", _appKey),
-                    new KeyValuePair<string, string>("client_secret", _appSecret)
-                });
-                request.Content = content;
-                var response = await httpClient.SendAsync(request);
-                response.EnsureSuccessStatusCode();
-                var json = await response.Content.ReadAsStringAsync();
-                var tokenData = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json);
-                _accessToken = tokenData["access_token"].GetString();
-                _tokenExpiration = DateTime.UtcNow.AddSeconds(tokenData["expires_in"].GetInt32());
-                _client = new DropboxClient(_accessToken);
-                Console.WriteLine($"Refreshed access token, expires at {_tokenExpiration}");
+            // Use refresh token if available, otherwise fall back to access token
+            if (!string.IsNullOrEmpty(refreshToken) && !string.IsNullOrEmpty(appKey) && !string.IsNullOrEmpty(appSecret)) {
+                _client = new DropboxClient(refreshToken, appKey, appSecret);
+            } else if (!string.IsNullOrEmpty(accessToken)) {
+                _client = new DropboxClient(accessToken);
+            } else {
+                throw new ArgumentException("Either a valid access token or a refresh token with app key and secret must be provided.");
             }
         }
 
         public async Task<Dictionary<string, (DateTime ModifiedTime, long Size)>> ListFilesAsync(string remotePath) {
-            await RefreshAccessTokenAsync();
             var files = new Dictionary<string, (DateTime, long)>();
             try {
                 var list = await _client.Files.ListFolderAsync(remotePath, recursive: true);
@@ -107,7 +79,6 @@ namespace GameSaveSync {
         }
 
         public async Task UploadFileAsync(string localPath, string remotePath) {
-            await RefreshAccessTokenAsync();
             try {
                 var normalizedRemotePath = remotePath.Replace('\\', '/');
                 using var stream = new FileStream(localPath, FileMode.Open, FileAccess.Read);
@@ -119,7 +90,6 @@ namespace GameSaveSync {
         }
 
         public async Task DownloadFileAsync(string remotePath, string localPath) {
-            await RefreshAccessTokenAsync();
             try {
                 var normalizedRemotePath = remotePath.Replace('\\', '/');
                 using var response = await _client.Files.DownloadAsync(normalizedRemotePath);
@@ -141,7 +111,6 @@ namespace GameSaveSync {
         }
 
         public async Task CreateFolderAsync(string remotePath) {
-            await RefreshAccessTokenAsync();
             try {
                 var normalizedRemotePath = remotePath.Replace('\\', '/');
                 await _client.Files.CreateFolderV2Async(normalizedRemotePath);

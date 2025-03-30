@@ -48,23 +48,6 @@ The access_token lasts 4 hours (14,400 seconds), but the refresh_token is what y
 
 Store the Refresh Token:
 Save the refresh_token securely (e.g., in your config.json or an environment variable). For your current setup, you could update config.json to include it:
-```json
-{
-  "syncPairs": [
-    {
-      "localPath": "E:\\GOG Galaxy\\Games\\HoMM 3 Complete\\Games",
-      "remotePath": "/GameSaves/HoMM3"
-    },
-    {
-      "localPath": "E:\\GOG Galaxy\\Games\\HoMM 2 Gold\\cloud_saves\\GAMES",
-      "remotePath": "/GameSaves/HoMM2"
-    }
-  ],
-  "cloudProvider": "Dropbox",
-  "credentials": "your-short-lived-token",
-  "refreshToken": "your-refresh-token-here"
-}
-```
 
 Example config.json
 ```json
@@ -85,6 +68,8 @@ Example config.json
   ],
   "cloudProvider": "Dropbox",
   "credentials": "temp token here",
-"refreshToken": "refresh token here"
+  "refreshToken": "refresh token here",
+  "appKey": "app key here",
+  "appSecret": "app secret here"
 }
 ```
