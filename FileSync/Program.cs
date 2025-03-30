@@ -27,13 +27,13 @@ namespace GameSaveSync {
         Task UploadFileAsync(string localPath, string remotePath);
         Task DownloadFileAsync(string remotePath, string localPath);
         Task CreateFolderAsync(string remotePath);
+        Task DeleteFileAsync(string remotePath); // Added method
     }
 
     public class DropboxStorageProvider : ICloudStorageProvider {
         private readonly DropboxClient _client;
 
         public DropboxStorageProvider(string accessToken, string refreshToken, string appKey, string appSecret) {
-            // Use refresh token if available, otherwise fall back to access token
             if (!string.IsNullOrEmpty(refreshToken) && !string.IsNullOrEmpty(appKey) && !string.IsNullOrEmpty(appSecret)) {
                 _client = new DropboxClient(refreshToken, appKey, appSecret);
             } else if (!string.IsNullOrEmpty(accessToken)) {
@@ -51,7 +51,7 @@ namespace GameSaveSync {
                     var file = entry.AsFile;
                     var serverTimestamp = file.ServerModified.ToUniversalTime();
                     var parsedTimestamp = ParseTimestampFromFilename(file.Name);
-                    var timestamp = parsedTimestamp ?? serverTimestamp; // Use parsed timestamp if available, otherwise server timestamp
+                    var timestamp = parsedTimestamp ?? serverTimestamp;
                     var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
                     files[relativePath] = (timestamp, (long)file.Size);
 
@@ -125,6 +125,16 @@ namespace GameSaveSync {
             }
         }
 
+        public async Task DeleteFileAsync(string remotePath) {
+            try {
+                var normalizedRemotePath = remotePath.Replace('\\', '/');
+                await _client.Files.DeleteV2Async(normalizedRemotePath);
+                Console.WriteLine($"Deleted {normalizedRemotePath} from cloud");
+            } catch (Exception ex) {
+                Console.WriteLine($"Error deleting {remotePath}: {ex.Message}");
+            }
+        }
+
         private static DateTime? ParseTimestampFromFilename(string filename) {
             if (filename.Length > 15 && filename[8] == '_' && filename[15] == '_') {
                 var timestampPart = filename.Substring(0, 15); // yyyyMMdd_HHmmss
@@ -157,7 +167,7 @@ namespace GameSaveSync {
         }
 
         public async Task AnalyzeAndSyncAsync(List<SyncPair> pairs) {
-            var syncActions = new List<(string Action, string LocalPath, string RemotePath, long Size)>();
+            var syncActions = new List<(string Action, string LocalPath, string RemotePath, long Size, string OldRemotePath)>();
             foreach (var pair in pairs) {
                 Directory.CreateDirectory(pair.LocalPath);
                 await _provider.CreateFolderAsync(pair.RemotePath);
@@ -175,9 +185,6 @@ namespace GameSaveSync {
                     var localTime = local.Value.ModifiedTime.TruncateToSeconds();
                     var remoteFilename = $"{localTime:yyyyMMdd_HHmmss}_{Path.GetFileName(local.Key)}";
                     var relativeDir = Path.GetDirectoryName(local.Key);
-                    if (relativeDir != "") {
-                        var tempA = "";
-                    }
                     var remotePath = string.IsNullOrEmpty(relativeDir)
                         ? $"{pair.RemotePath}/{remoteFilename}"
                         : $"{pair.RemotePath}/{relativeDir}/{remoteFilename}";
@@ -186,7 +193,6 @@ namespace GameSaveSync {
                         await _provider.CreateFolderAsync($"{pair.RemotePath}/{relativeDir}");
                     }
 
-                    // Normalize remote keys for comparison
                     var matchingCloudFile = remoteFiles.Keys
                         .FirstOrDefault(k => {
                             var remoteDir = Path.GetDirectoryName(k) ?? "";
@@ -201,16 +207,16 @@ namespace GameSaveSync {
                         });
 
                     if (matchingCloudFile == null) {
-                        syncActions.Add(("Upload", localPath, remotePath, local.Value.Size));
+                        syncActions.Add(("Upload", localPath, remotePath, local.Value.Size, null));
                         Console.WriteLine($"Will upload {local.Key} (missing in cloud)");
                     } else {
                         var remoteTime = remoteFiles[matchingCloudFile].ModifiedTime.TruncateToSeconds();
                         Console.WriteLine($"Debug: Comparing {local.Key} - Local: {localTime:yyyy-MM-dd HH:mm:ss}, Remote: {remoteTime:yyyy-MM-dd HH:mm:ss}");
                         if (localTime > remoteTime) {
-                            syncActions.Add(("Upload", localPath, remotePath, local.Value.Size));
-                            Console.WriteLine($"Will upload {local.Key} (local newer: {localTime} vs cloud {remoteTime})");
+                            syncActions.Add(("Upload", localPath, remotePath, local.Value.Size, $"{pair.RemotePath}/{matchingCloudFile}"));
+                            Console.WriteLine($"Will upload {local.Key} (local newer: {localTime} vs cloud {remoteTime}) and delete old cloud file");
                         } else if (remoteTime > localTime) {
-                            syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{matchingCloudFile}", remoteFiles[matchingCloudFile].Size));
+                            syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{matchingCloudFile}", remoteFiles[matchingCloudFile].Size, null));
                             Console.WriteLine($"Will download {local.Key} (cloud newer: {remoteTime} vs local {localTime})");
                         } else {
                             Console.WriteLine($"Skipping {local.Key} (timestamps match: {localTime})");
@@ -225,7 +231,7 @@ namespace GameSaveSync {
                     var remoteTime = remote.Value.ModifiedTime.TruncateToSeconds();
 
                     if (!localFiles.ContainsKey(relativePath.Replace(Path.DirectorySeparatorChar, '/'))) {
-                        syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{remote.Key}", remote.Value.Size));
+                        syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{remote.Key}", remote.Value.Size, null));
                         Console.WriteLine($"Will download {relativePath} (missing locally)");
                     }
                 }
@@ -241,10 +247,14 @@ namespace GameSaveSync {
             Console.WriteLine();
 
             foreach (var action in syncActions) {
-                if (action.Action == "Upload")
+                if (action.Action == "Upload") {
+                    if (!string.IsNullOrEmpty(action.OldRemotePath)) {
+                        await _provider.DeleteFileAsync(action.OldRemotePath);
+                    }
                     await _provider.UploadFileAsync(action.LocalPath, action.RemotePath);
-                else if (action.Action == "Download")
+                } else if (action.Action == "Download") {
                     await _provider.DownloadFileAsync(action.RemotePath, action.LocalPath);
+                }
 
                 _filesSynced++;
                 _bytesSynced += action.Size;
