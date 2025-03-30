@@ -74,16 +74,33 @@ namespace GameSaveSync {
             await RefreshAccessTokenAsync();
             var files = new Dictionary<string, (DateTime, long)>();
             try {
-                var list = await _client.Files.ListFolderAsync(remotePath);
+                // Recursively list all files in the remote path
+                var list = await _client.Files.ListFolderAsync(remotePath, recursive: true);
                 foreach (var entry in list.Entries.Where(e => e.IsFile)) {
                     var file = entry.AsFile;
-                    // Use ServerModified as the primary timestamp
                     var timestamp = file.ServerModified.ToUniversalTime();
                     var parsedTimestamp = ParseTimestampFromFilename(file.Name);
                     if (parsedTimestamp.HasValue) {
-                        Console.WriteLine($"Debug: File {file.Name} - ServerModified: {timestamp:yyyy-MM-dd HH:mm:ss}, Parsed from filename: {parsedTimestamp.Value:yyyy-MM-dd HH:mm:ss}");
+                        Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {timestamp:yyyy-MM-dd HH:mm:ss}, Parsed from filename: {parsedTimestamp.Value:yyyy-MM-dd HH:mm:ss}");
                     }
-                    files[file.Name] = (timestamp, (long)file.Size);
+                    // Use the full path relative to remotePath as the key
+                    var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
+                    files[relativePath] = (timestamp, (long)file.Size);
+                }
+
+                // Handle pagination if there are more entries
+                while (list.HasMore) {
+                    list = await _client.Files.ListFolderContinueAsync(list.Cursor);
+                    foreach (var entry in list.Entries.Where(e => e.IsFile)) {
+                        var file = entry.AsFile;
+                        var timestamp = file.ServerModified.ToUniversalTime();
+                        var parsedTimestamp = ParseTimestampFromFilename(file.Name);
+                        if (parsedTimestamp.HasValue) {
+                            Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {timestamp:yyyy-MM-dd HH:mm:ss}, Parsed from filename: {parsedTimestamp.Value:yyyy-MM-dd HH:mm:ss}");
+                        }
+                        var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
+                        files[relativePath] = (timestamp, (long)file.Size);
+                    }
                 }
                 return files;
             } catch (Exception ex) {
@@ -114,6 +131,7 @@ namespace GameSaveSync {
                 var originalFilename = SyncManager.StripTimestampFromFilename(cloudFilename);
                 var finalLocalPath = Path.Combine(Path.GetDirectoryName(localPath), originalFilename);
 
+                Directory.CreateDirectory(Path.GetDirectoryName(finalLocalPath)); // Ensure local subfolder exists
                 using var stream = await response.GetContentAsStreamAsync();
                 using var fileStream = new FileStream(finalLocalPath, FileMode.Create, FileAccess.Write);
                 await stream.CopyToAsync(fileStream);
@@ -174,9 +192,10 @@ namespace GameSaveSync {
                 Directory.CreateDirectory(pair.LocalPath);
                 await _provider.CreateFolderAsync(pair.RemotePath);
 
-                var localFiles = Directory.GetFiles(pair.LocalPath)
+                // Recursively get all files in local directory and subdirectories
+                var localFiles = Directory.EnumerateFiles(pair.LocalPath, "*", SearchOption.AllDirectories)
                     .ToDictionary(
-                        Path.GetFileName,
+                        f => f.Substring(pair.LocalPath.Length).TrimStart(Path.DirectorySeparatorChar),
                         f => (ModifiedTime: File.GetLastWriteTimeUtc(f), Size: new FileInfo(f).Length),
                         StringComparer.OrdinalIgnoreCase);
 
@@ -185,11 +204,20 @@ namespace GameSaveSync {
                 foreach (var local in localFiles) {
                     var localPath = Path.Combine(pair.LocalPath, local.Key);
                     var localTime = local.Value.ModifiedTime.TruncateToSeconds();
-                    var remoteFilename = $"{localTime:yyyyMMdd_HHmmss}_{local.Key}";
-                    var remotePath = $"{pair.RemotePath}/{remoteFilename}";
+                    var remoteFilename = $"{localTime:yyyyMMdd_HHmmss}_{Path.GetFileName(local.Key)}";
+                    var relativeDir = Path.GetDirectoryName(local.Key);
+                    var remotePath = string.IsNullOrEmpty(relativeDir)
+                        ? $"{pair.RemotePath}/{remoteFilename}"
+                        : $"{pair.RemotePath}/{relativeDir.Replace('\\', '/')}/{remoteFilename}";
+
+                    // Ensure the remote subdirectory exists
+                    if (!string.IsNullOrEmpty(relativeDir)) {
+                        await _provider.CreateFolderAsync($"{pair.RemotePath}/{relativeDir.Replace('\\', '/')}");
+                    }
 
                     var matchingCloudFile = remoteFiles.Keys
-                        .Where(k => StripTimestampFromFilename(k).Equals(local.Key, StringComparison.OrdinalIgnoreCase))
+                        .Where(k => StripTimestampFromFilename(k).Equals(Path.GetFileName(local.Key), StringComparison.OrdinalIgnoreCase) &&
+                                    Path.GetDirectoryName(k).Replace('/', '\\') == relativeDir)
                         .FirstOrDefault();
 
                     if (matchingCloudFile == null) {
@@ -212,12 +240,13 @@ namespace GameSaveSync {
 
                 foreach (var remote in remoteFiles) {
                     var originalFilename = StripTimestampFromFilename(remote.Key);
-                    var localPath = Path.Combine(pair.LocalPath, originalFilename);
+                    var relativePath = Path.Combine(Path.GetDirectoryName(remote.Key), originalFilename).Replace('/', Path.DirectorySeparatorChar);
+                    var localPath = Path.Combine(pair.LocalPath, relativePath);
                     var remoteTime = remote.Value.ModifiedTime.TruncateToSeconds();
 
-                    if (!localFiles.ContainsKey(originalFilename)) {
+                    if (!localFiles.ContainsKey(relativePath)) {
                         syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{remote.Key}", remote.Value.Size));
-                        Console.WriteLine($"Will download {originalFilename} (missing locally)");
+                        Console.WriteLine($"Will download {relativePath} (missing locally)");
                     }
                 }
             }
