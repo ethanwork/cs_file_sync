@@ -77,7 +77,12 @@ namespace GameSaveSync {
                 var list = await _client.Files.ListFolderAsync(remotePath);
                 foreach (var entry in list.Entries.Where(e => e.IsFile)) {
                     var file = entry.AsFile;
-                    var timestamp = ParseTimestampFromFilename(file.Name) ?? file.ServerModified.ToUniversalTime();
+                    // Use ServerModified as the primary timestamp
+                    var timestamp = file.ServerModified.ToUniversalTime();
+                    var parsedTimestamp = ParseTimestampFromFilename(file.Name);
+                    if (parsedTimestamp.HasValue) {
+                        Console.WriteLine($"Debug: File {file.Name} - ServerModified: {timestamp:yyyy-MM-dd HH:mm:ss}, Parsed from filename: {parsedTimestamp.Value:yyyy-MM-dd HH:mm:ss}");
+                    }
                     files[file.Name] = (timestamp, (long)file.Size);
                 }
                 return files;
@@ -92,8 +97,8 @@ namespace GameSaveSync {
             try {
                 var normalizedRemotePath = remotePath.Replace('\\', '/');
                 using var stream = new FileStream(localPath, FileMode.Open, FileAccess.Read);
-                await _client.Files.UploadAsync(normalizedRemotePath, body: stream);
-                Console.WriteLine($"Uploaded {localPath} to {normalizedRemotePath}");
+                var response = await _client.Files.UploadAsync(normalizedRemotePath, body: stream, mute: true);
+                Console.WriteLine($"Uploaded {localPath} to {normalizedRemotePath} (ServerModified: {response.ServerModified:yyyy-MM-dd HH:mm:ss})");
             } catch (Exception ex) {
                 Console.WriteLine($"Error uploading {localPath} to {remotePath}: {ex.Message}");
             }
@@ -105,7 +110,7 @@ namespace GameSaveSync {
                 var normalizedRemotePath = remotePath.Replace('\\', '/');
                 using var response = await _client.Files.DownloadAsync(normalizedRemotePath);
                 var cloudFilename = Path.GetFileName(normalizedRemotePath);
-                var timestamp = ParseTimestampFromFilename(cloudFilename) ?? response.Response.ServerModified.ToUniversalTime();
+                var timestamp = response.Response.ServerModified.ToUniversalTime();
                 var originalFilename = SyncManager.StripTimestampFromFilename(cloudFilename);
                 var finalLocalPath = Path.Combine(Path.GetDirectoryName(localPath), originalFilename);
 
@@ -114,7 +119,7 @@ namespace GameSaveSync {
                 await stream.CopyToAsync(fileStream);
                 fileStream.Close();
                 File.SetLastWriteTimeUtc(finalLocalPath, timestamp);
-                Console.WriteLine($"Downloaded {normalizedRemotePath} to {finalLocalPath} (set timestamp: {timestamp})");
+                Console.WriteLine($"Downloaded {normalizedRemotePath} to {finalLocalPath} (set timestamp: {timestamp:yyyy-MM-dd HH:mm:ss})");
             } catch (Exception ex) {
                 Console.WriteLine($"Error downloading {remotePath} to {localPath}: {ex.Message}");
             }
@@ -140,8 +145,6 @@ namespace GameSaveSync {
             }
             return null;
         }
-
-        
     }
 
     public class SyncManager {
@@ -194,6 +197,7 @@ namespace GameSaveSync {
                         Console.WriteLine($"Will upload {local.Key} (missing in cloud)");
                     } else {
                         var remoteTime = remoteFiles[matchingCloudFile].ModifiedTime.TruncateToSeconds();
+                        Console.WriteLine($"Debug: Comparing {local.Key} - Local: {localTime:yyyy-MM-dd HH:mm:ss}, Remote: {remoteTime:yyyy-MM-dd HH:mm:ss}");
                         if (localTime > remoteTime) {
                             syncActions.Add(("Upload", localPath, remotePath, local.Value.Size));
                             Console.WriteLine($"Will upload {local.Key} (local newer: {localTime} vs cloud {remoteTime})");
