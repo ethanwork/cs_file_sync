@@ -145,6 +145,7 @@ namespace GameSaveSync {
                     var timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(
                         tzPart switch {
                             "UTC" => "UTC",
+                            "Pacific Standard Time" => "Pacific Standard Time",
                             _ => TimeZoneInfo.Local.Id
                         }
                     );
