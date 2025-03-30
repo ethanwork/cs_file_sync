@@ -74,7 +74,6 @@ namespace GameSaveSync {
             await RefreshAccessTokenAsync();
             var files = new Dictionary<string, (DateTime, long)>();
             try {
-                // Recursively list all files in the remote path
                 var list = await _client.Files.ListFolderAsync(remotePath, recursive: true);
                 foreach (var entry in list.Entries.Where(e => e.IsFile)) {
                     var file = entry.AsFile;
@@ -83,12 +82,10 @@ namespace GameSaveSync {
                     if (parsedTimestamp.HasValue) {
                         Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {timestamp:yyyy-MM-dd HH:mm:ss}, Parsed from filename: {parsedTimestamp.Value:yyyy-MM-dd HH:mm:ss}");
                     }
-                    // Use the full path relative to remotePath as the key
                     var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
                     files[relativePath] = (timestamp, (long)file.Size);
                 }
 
-                // Handle pagination if there are more entries
                 while (list.HasMore) {
                     list = await _client.Files.ListFolderContinueAsync(list.Cursor);
                     foreach (var entry in list.Entries.Where(e => e.IsFile)) {
@@ -131,7 +128,7 @@ namespace GameSaveSync {
                 var originalFilename = SyncManager.StripTimestampFromFilename(cloudFilename);
                 var finalLocalPath = Path.Combine(Path.GetDirectoryName(localPath), originalFilename);
 
-                Directory.CreateDirectory(Path.GetDirectoryName(finalLocalPath)); // Ensure local subfolder exists
+                Directory.CreateDirectory(Path.GetDirectoryName(finalLocalPath));
                 using var stream = await response.GetContentAsStreamAsync();
                 using var fileStream = new FileStream(finalLocalPath, FileMode.Create, FileAccess.Write);
                 await stream.CopyToAsync(fileStream);
@@ -192,33 +189,40 @@ namespace GameSaveSync {
                 Directory.CreateDirectory(pair.LocalPath);
                 await _provider.CreateFolderAsync(pair.RemotePath);
 
-                // Recursively get all files in local directory and subdirectories
                 var localFiles = Directory.EnumerateFiles(pair.LocalPath, "*", SearchOption.AllDirectories)
                     .ToDictionary(
-                        f => f.Substring(pair.LocalPath.Length).TrimStart(Path.DirectorySeparatorChar),
+                        f => f.Substring(pair.LocalPath.Length).TrimStart(Path.DirectorySeparatorChar).Replace('\\', '/'),
                         f => (ModifiedTime: File.GetLastWriteTimeUtc(f), Size: new FileInfo(f).Length),
                         StringComparer.OrdinalIgnoreCase);
 
                 var remoteFiles = await _provider.ListFilesAsync(pair.RemotePath);
 
                 foreach (var local in localFiles) {
-                    var localPath = Path.Combine(pair.LocalPath, local.Key);
+                    var localPath = Path.Combine(pair.LocalPath, local.Key.Replace('/', Path.DirectorySeparatorChar));
                     var localTime = local.Value.ModifiedTime.TruncateToSeconds();
                     var remoteFilename = $"{localTime:yyyyMMdd_HHmmss}_{Path.GetFileName(local.Key)}";
                     var relativeDir = Path.GetDirectoryName(local.Key);
                     var remotePath = string.IsNullOrEmpty(relativeDir)
                         ? $"{pair.RemotePath}/{remoteFilename}"
-                        : $"{pair.RemotePath}/{relativeDir.Replace('\\', '/')}/{remoteFilename}";
+                        : $"{pair.RemotePath}/{relativeDir}/{remoteFilename}";
 
-                    // Ensure the remote subdirectory exists
                     if (!string.IsNullOrEmpty(relativeDir)) {
-                        await _provider.CreateFolderAsync($"{pair.RemotePath}/{relativeDir.Replace('\\', '/')}");
+                        await _provider.CreateFolderAsync($"{pair.RemotePath}/{relativeDir}");
                     }
 
+                    // Normalize remote keys for comparison
                     var matchingCloudFile = remoteFiles.Keys
-                        .Where(k => StripTimestampFromFilename(k).Equals(Path.GetFileName(local.Key), StringComparison.OrdinalIgnoreCase) &&
-                                    Path.GetDirectoryName(k).Replace('/', '\\') == relativeDir)
-                        .FirstOrDefault();
+                        .FirstOrDefault(k => {
+                            var remoteDir = Path.GetDirectoryName(k) ?? "";
+                            var remoteFile = StripTimestampFromFilename(Path.GetFileName(k));
+                            var localDir = Path.GetDirectoryName(local.Key) ?? "";
+                            var localFile = Path.GetFileName(local.Key);
+                            var match = remoteDir.Equals(localDir, StringComparison.OrdinalIgnoreCase) &&
+                                        remoteFile.Equals(localFile, StringComparison.OrdinalIgnoreCase);
+                            if (!match && remoteDir == localDir)
+                                Console.WriteLine($"Debug: No match for {local.Key} with cloud {k} (filename mismatch: {remoteFile} vs {localFile})");
+                            return match;
+                        });
 
                     if (matchingCloudFile == null) {
                         syncActions.Add(("Upload", localPath, remotePath, local.Value.Size));
@@ -240,11 +244,11 @@ namespace GameSaveSync {
 
                 foreach (var remote in remoteFiles) {
                     var originalFilename = StripTimestampFromFilename(remote.Key);
-                    var relativePath = Path.Combine(Path.GetDirectoryName(remote.Key), originalFilename).Replace('/', Path.DirectorySeparatorChar);
+                    var relativePath = Path.Combine(Path.GetDirectoryName(remote.Key) ?? "", originalFilename).Replace('/', Path.DirectorySeparatorChar);
                     var localPath = Path.Combine(pair.LocalPath, relativePath);
                     var remoteTime = remote.Value.ModifiedTime.TruncateToSeconds();
 
-                    if (!localFiles.ContainsKey(relativePath)) {
+                    if (!localFiles.ContainsKey(relativePath.Replace(Path.DirectorySeparatorChar, '/'))) {
                         syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{remote.Key}", remote.Value.Size));
                         Console.WriteLine($"Will download {relativePath} (missing locally)");
                     }
