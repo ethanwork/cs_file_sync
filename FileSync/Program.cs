@@ -11,7 +11,7 @@ namespace GameSaveSync {
     public class Config {
         public List<SyncPair> SyncPairs { get; set; } = new List<SyncPair>();
         public string CloudProvider { get; set; } = string.Empty;
-        public string Credentials { get; set; } = string.Empty; // Optional, only needed if not using refresh token initially
+        public string Credentials { get; set; } = string.Empty;
         public string RefreshToken { get; set; } = string.Empty;
         public string AppKey { get; set; } = string.Empty;
         public string AppSecret { get; set; } = string.Empty;
@@ -27,7 +27,7 @@ namespace GameSaveSync {
         Task UploadFileAsync(string localPath, string remotePath);
         Task DownloadFileAsync(string remotePath, string localPath);
         Task CreateFolderAsync(string remotePath);
-        Task DeleteFileAsync(string remotePath); // Added method
+        Task DeleteFileAsync(string remotePath);
     }
 
     public class DropboxStorageProvider : ICloudStorageProvider {
@@ -136,10 +136,29 @@ namespace GameSaveSync {
         }
 
         private static DateTime? ParseTimestampFromFilename(string filename) {
-            if (filename.Length > 15 && filename[8] == '_' && filename[15] == '_') {
-                var timestampPart = filename.Substring(0, 15); // yyyyMMdd_HHmmss
-                if (DateTime.TryParseExact(timestampPart, "yyyyMMdd_HHmmss", null, System.Globalization.DateTimeStyles.AssumeUniversal, out var timestamp))
-                    return timestamp;
+            if (filename.Length > 19 && filename[8] == '_' && filename[15] == '_') {
+                var timestampPart = filename.Substring(0, 19); // yyyyMMdd_HHmmss_XXX
+                var timePart = timestampPart.Substring(0, 15); // yyyyMMdd_HHmmss
+                var tzPart = timestampPart.Substring(16);      // timezone (e.g., UTC, PST)
+
+                try {
+                    var timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(
+                        tzPart switch {
+                            "UTC" => "UTC",
+                            _ => TimeZoneInfo.Local.Id
+                        }
+                    );
+
+                    if (DateTime.TryParseExact(timePart, "yyyyMMdd_HHmmss", null,
+                        System.Globalization.DateTimeStyles.None, out var timestamp)) {
+                        return TimeZoneInfo.ConvertTimeToUtc(timestamp, timeZoneInfo);
+                    }
+                } catch (TimeZoneNotFoundException) {
+                    if (DateTime.TryParseExact(timePart, "yyyyMMdd_HHmmss", null,
+                        System.Globalization.DateTimeStyles.AssumeUniversal, out var timestamp)) {
+                        return timestamp;
+                    }
+                }
             }
             return null;
         }
@@ -161,8 +180,26 @@ namespace GameSaveSync {
         }
 
         public static string StripTimestampFromFilename(string filename) {
-            if (filename.Length > 15 && filename[8] == '_' && filename[15] == '_')
-                return filename.Substring(16);
+            // Count underscores and find the position of the third one
+            int underscoreCount = 0;
+            int thirdUnderscoreIndex = -1;
+
+            for (int i = 0; i < filename.Length; i++) {
+                if (filename[i] == '_') {
+                    underscoreCount++;
+                    if (underscoreCount == 3) {
+                        thirdUnderscoreIndex = i;
+                        break;
+                    }
+                }
+            }
+
+            // If we found 3 or more underscores and there's content after the third one
+            if (underscoreCount >= 3 && thirdUnderscoreIndex + 1 < filename.Length) {
+                return filename.Substring(thirdUnderscoreIndex + 1);
+            }
+
+            // Return original filename if conditions aren't met
             return filename;
         }
 
@@ -183,7 +220,8 @@ namespace GameSaveSync {
                 foreach (var local in localFiles) {
                     var localPath = Path.Combine(pair.LocalPath, local.Key.Replace('/', Path.DirectorySeparatorChar));
                     var localTime = local.Value.ModifiedTime.TruncateToSeconds();
-                    var remoteFilename = $"{localTime:yyyyMMdd_HHmmss}_{Path.GetFileName(local.Key)}";
+                    var localTimeZone = TimeZoneInfo.Local.Id;
+                    var remoteFilename = $"{localTime:yyyyMMdd_HHmmss}_{localTimeZone}_{Path.GetFileName(local.Key)}";
                     var relativeDir = Path.GetDirectoryName(local.Key);
                     var remotePath = string.IsNullOrEmpty(relativeDir)
                         ? $"{pair.RemotePath}/{remoteFilename}"
@@ -211,13 +249,13 @@ namespace GameSaveSync {
                         Console.WriteLine($"Will upload {local.Key} (missing in cloud)");
                     } else {
                         var remoteTime = remoteFiles[matchingCloudFile].ModifiedTime.TruncateToSeconds();
-                        Console.WriteLine($"Debug: Comparing {local.Key} - Local: {localTime:yyyy-MM-dd HH:mm:ss}, Remote: {remoteTime:yyyy-MM-dd HH:mm:ss}");
+                        Console.WriteLine($"Debug: Comparing {local.Key} - Local: {localTime:yyyy-MM-dd HH:mm:ss} ({localTimeZone}), Remote: {remoteTime:yyyy-MM-dd HH:mm:ss} (UTC)");
                         if (localTime > remoteTime) {
                             syncActions.Add(("Upload", localPath, remotePath, local.Value.Size, $"{pair.RemotePath}/{matchingCloudFile}"));
-                            Console.WriteLine($"Will upload {local.Key} (local newer: {localTime} vs cloud {remoteTime}) and delete old cloud file");
+                            Console.WriteLine($"Will upload {local.Key} (local newer: {localTime} ({localTimeZone}) vs cloud {remoteTime} (UTC)) and delete old cloud file");
                         } else if (remoteTime > localTime) {
                             syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{matchingCloudFile}", remoteFiles[matchingCloudFile].Size, null));
-                            Console.WriteLine($"Will download {local.Key} (cloud newer: {remoteTime} vs local {localTime})");
+                            Console.WriteLine($"Will download {local.Key} (cloud newer: {remoteTime} (UTC) vs local {localTime} ({localTimeZone}))");
                         } else {
                             Console.WriteLine($"Skipping {local.Key} (timestamps match: {localTime})");
                         }
@@ -232,7 +270,7 @@ namespace GameSaveSync {
 
                     if (!localFiles.ContainsKey(relativePath.Replace(Path.DirectorySeparatorChar, '/'))) {
                         syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{remote.Key}", remote.Value.Size, null));
-                        Console.WriteLine($"Will download {relativePath} (missing locally)");
+                        Console.WriteLine($"Will download {relativePath} (missing locally, cloud timestamp: {remoteTime} UTC)");
                     }
                 }
             }
