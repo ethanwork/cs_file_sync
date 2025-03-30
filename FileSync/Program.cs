@@ -47,8 +47,8 @@ namespace GameSaveSync {
             _client = new DropboxClient(_accessToken);
         }
 
-        private async Task RefreshAccessTokenAsync() {
-            if (DateTime.UtcNow >= _tokenExpiration) {
+        private async Task RefreshAccessTokenAsync(bool forceRefresh = false) {
+            if (forceRefresh || DateTime.UtcNow >= _tokenExpiration) {
                 using var httpClient = new HttpClient();
                 var request = new HttpRequestMessage(HttpMethod.Post, "https://api.dropbox.com/oauth2/token");
                 var content = new FormUrlEncodedContent(new[]
@@ -70,24 +70,22 @@ namespace GameSaveSync {
             }
         }
 
-        public async Task<Dictionary<string, (DateTime ModifiedTime, long Size)>> ListFilesAsync(string remotePath) {
-            await RefreshAccessTokenAsync();
-            var files = new Dictionary<string, (DateTime, long)>();
+        private async Task<T> ExecuteWithTokenRefreshAsync<T>(Func<Task<T>> operation) {
             try {
-                var list = await _client.Files.ListFolderAsync(remotePath, recursive: true);
-                foreach (var entry in list.Entries.Where(e => e.IsFile)) {
-                    var file = entry.AsFile;
-                    var timestamp = file.ServerModified.ToUniversalTime();
-                    var parsedTimestamp = ParseTimestampFromFilename(file.Name);
-                    if (parsedTimestamp.HasValue) {
-                        Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {timestamp:yyyy-MM-dd HH:mm:ss}, Parsed from filename: {parsedTimestamp.Value:yyyy-MM-dd HH:mm:ss}");
-                    }
-                    var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
-                    files[relativePath] = (timestamp, (long)file.Size);
-                }
+                await RefreshAccessTokenAsync();
+                return await operation();
+            } catch (Exception ex) when (ex.Message.Contains("expired_access_token")) {
+                Console.WriteLine("Token expired during operation, refreshing...");
+                await RefreshAccessTokenAsync(true);
+                return await operation();
+            }
+        }
 
-                while (list.HasMore) {
-                    list = await _client.Files.ListFolderContinueAsync(list.Cursor);
+        public async Task<Dictionary<string, (DateTime ModifiedTime, long Size)>> ListFilesAsync(string remotePath) {
+            return await ExecuteWithTokenRefreshAsync(async () => {
+                var files = new Dictionary<string, (DateTime, long)>();
+                try {
+                    var list = await _client.Files.ListFolderAsync(remotePath, recursive: true);
                     foreach (var entry in list.Entries.Where(e => e.IsFile)) {
                         var file = entry.AsFile;
                         var timestamp = file.ServerModified.ToUniversalTime();
@@ -98,58 +96,77 @@ namespace GameSaveSync {
                         var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
                         files[relativePath] = (timestamp, (long)file.Size);
                     }
+
+                    while (list.HasMore) {
+                        list = await _client.Files.ListFolderContinueAsync(list.Cursor);
+                        foreach (var entry in list.Entries.Where(e => e.IsFile)) {
+                            var file = entry.AsFile;
+                            var timestamp = file.ServerModified.ToUniversalTime();
+                            var parsedTimestamp = ParseTimestampFromFilename(file.Name);
+                            if (parsedTimestamp.HasValue) {
+                                Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {timestamp:yyyy-MM-dd HH:mm:ss}, Parsed from filename: {parsedTimestamp.Value:yyyy-MM-dd HH:mm:ss}");
+                            }
+                            var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
+                            files[relativePath] = (timestamp, (long)file.Size);
+                        }
+                    }
+                    return files;
+                } catch (Exception ex) when (!ex.Message.Contains("expired_access_token")) {
+                    Console.WriteLine($"Error listing files in {remotePath}: {ex.Message}");
+                    return files;
                 }
-                return files;
-            } catch (Exception ex) {
-                Console.WriteLine($"Error listing files in {remotePath}: {ex.Message}");
-                return files;
-            }
+            });
         }
 
         public async Task UploadFileAsync(string localPath, string remotePath) {
-            await RefreshAccessTokenAsync();
-            try {
-                var normalizedRemotePath = remotePath.Replace('\\', '/');
-                using var stream = new FileStream(localPath, FileMode.Open, FileAccess.Read);
-                var response = await _client.Files.UploadAsync(normalizedRemotePath, body: stream, mute: true);
-                Console.WriteLine($"Uploaded {localPath} to {normalizedRemotePath} (ServerModified: {response.ServerModified:yyyy-MM-dd HH:mm:ss})");
-            } catch (Exception ex) {
-                Console.WriteLine($"Error uploading {localPath} to {remotePath}: {ex.Message}");
-            }
+            await ExecuteWithTokenRefreshAsync(async () => {
+                try {
+                    var normalizedRemotePath = remotePath.Replace('\\', '/');
+                    using var stream = new FileStream(localPath, FileMode.Open, FileAccess.Read);
+                    var response = await _client.Files.UploadAsync(normalizedRemotePath, body: stream, mute: true);
+                    Console.WriteLine($"Uploaded {localPath} to {normalizedRemotePath} (ServerModified: {response.ServerModified:yyyy-MM-dd HH:mm:ss})");
+                } catch (Exception ex) when (!ex.Message.Contains("expired_access_token")) {
+                    Console.WriteLine($"Error uploading {localPath} to {remotePath}: {ex.Message}");
+                }
+                return true;
+            });
         }
 
         public async Task DownloadFileAsync(string remotePath, string localPath) {
-            await RefreshAccessTokenAsync();
-            try {
-                var normalizedRemotePath = remotePath.Replace('\\', '/');
-                using var response = await _client.Files.DownloadAsync(normalizedRemotePath);
-                var cloudFilename = Path.GetFileName(normalizedRemotePath);
-                var timestamp = response.Response.ServerModified.ToUniversalTime();
-                var originalFilename = SyncManager.StripTimestampFromFilename(cloudFilename);
-                var finalLocalPath = Path.Combine(Path.GetDirectoryName(localPath), originalFilename);
+            await ExecuteWithTokenRefreshAsync(async () => {
+                try {
+                    var normalizedRemotePath = remotePath.Replace('\\', '/');
+                    using var response = await _client.Files.DownloadAsync(normalizedRemotePath);
+                    var cloudFilename = Path.GetFileName(normalizedRemotePath);
+                    var timestamp = response.Response.ServerModified.ToUniversalTime();
+                    var originalFilename = SyncManager.StripTimestampFromFilename(cloudFilename);
+                    var finalLocalPath = Path.Combine(Path.GetDirectoryName(localPath), originalFilename);
 
-                Directory.CreateDirectory(Path.GetDirectoryName(finalLocalPath));
-                using var stream = await response.GetContentAsStreamAsync();
-                using var fileStream = new FileStream(finalLocalPath, FileMode.Create, FileAccess.Write);
-                await stream.CopyToAsync(fileStream);
-                fileStream.Close();
-                File.SetLastWriteTimeUtc(finalLocalPath, timestamp);
-                Console.WriteLine($"Downloaded {normalizedRemotePath} to {finalLocalPath} (set timestamp: {timestamp:yyyy-MM-dd HH:mm:ss})");
-            } catch (Exception ex) {
-                Console.WriteLine($"Error downloading {remotePath} to {localPath}: {ex.Message}");
-            }
+                    Directory.CreateDirectory(Path.GetDirectoryName(finalLocalPath));
+                    using var stream = await response.GetContentAsStreamAsync();
+                    using var fileStream = new FileStream(finalLocalPath, FileMode.Create, FileAccess.Write);
+                    await stream.CopyToAsync(fileStream);
+                    fileStream.Close();
+                    File.SetLastWriteTimeUtc(finalLocalPath, timestamp);
+                    Console.WriteLine($"Downloaded {normalizedRemotePath} to {finalLocalPath} (set timestamp: {timestamp:yyyy-MM-dd HH:mm:ss})");
+                } catch (Exception ex) when (!ex.Message.Contains("expired_access_token")) {
+                    Console.WriteLine($"Error downloading {remotePath} to {localPath}: {ex.Message}");
+                }
+                return true;
+            });
         }
 
         public async Task CreateFolderAsync(string remotePath) {
-            await RefreshAccessTokenAsync();
-            try {
-                var normalizedRemotePath = remotePath.Replace('\\', '/');
-                await _client.Files.CreateFolderV2Async(normalizedRemotePath);
-                Console.WriteLine($"Created folder: {normalizedRemotePath}");
-            } catch (Exception ex) {
-                if (!ex.Message.Contains("path/conflict/folder"))
+            await ExecuteWithTokenRefreshAsync(async () => {
+                try {
+                    var normalizedRemotePath = remotePath.Replace('\\', '/');
+                    await _client.Files.CreateFolderV2Async(normalizedRemotePath);
+                    Console.WriteLine($"Created folder: {normalizedRemotePath}");
+                } catch (Exception ex) when (!ex.Message.Contains("expired_access_token") && !ex.Message.Contains("path/conflict/folder")) {
                     Console.WriteLine($"Error creating folder {remotePath}: {ex.Message}");
-            }
+                }
+                return true;
+            });
         }
 
         private static DateTime? ParseTimestampFromFilename(string filename) {
