@@ -23,11 +23,13 @@ namespace GameSaveSync {
     }
 
     public interface ICloudStorageProvider {
-        Task<Dictionary<string, (DateTime ModifiedTime, long Size)>> ListFilesAsync(string remotePath);
         Task UploadFileAsync(string localPath, string remotePath);
         Task DownloadFileAsync(string remotePath, string localPath);
         Task CreateFolderAsync(string remotePath);
         Task DeleteFileAsync(string remotePath);
+        Task<List<string>> ListFoldersAsync(string remotePath);
+        Task<string> DownloadTextFileAsync(string remotePath);
+        Task UploadTextFileAsync(string content, string remotePath);
     }
 
     public class DropboxStorageProvider : ICloudStorageProvider {
@@ -43,51 +45,12 @@ namespace GameSaveSync {
             }
         }
 
-        public async Task<Dictionary<string, (DateTime ModifiedTime, long Size)>> ListFilesAsync(string remotePath) {
-            var files = new Dictionary<string, (DateTime, long)>();
-            try {
-                var list = await _client.Files.ListFolderAsync(remotePath, recursive: true);
-                foreach (var entry in list.Entries.Where(e => e.IsFile)) {
-                    var file = entry.AsFile;
-                    var serverTimestamp = file.ServerModified.ToUniversalTime();
-                    var parsedTimestamp = ParseTimestampFromFilename(file.Name);
-                    var timestamp = parsedTimestamp ?? serverTimestamp;
-                    var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
-                    files[relativePath] = (timestamp, (long)file.Size);
-
-                    Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {serverTimestamp:yyyy-MM-dd HH:mm:ss}, " +
-                                     $"Parsed from filename: {(parsedTimestamp.HasValue ? parsedTimestamp.Value.ToString("yyyy-MM-dd HH:mm:ss") : "N/A")}, " +
-                                     $"Using: {timestamp:yyyy-MM-dd HH:mm:ss}");
-                }
-
-                while (list.HasMore) {
-                    list = await _client.Files.ListFolderContinueAsync(list.Cursor);
-                    foreach (var entry in list.Entries.Where(e => e.IsFile)) {
-                        var file = entry.AsFile;
-                        var serverTimestamp = file.ServerModified.ToUniversalTime();
-                        var parsedTimestamp = ParseTimestampFromFilename(file.Name);
-                        var timestamp = parsedTimestamp ?? serverTimestamp;
-                        var relativePath = file.PathDisplay.Substring(remotePath.Length).TrimStart('/');
-                        files[relativePath] = (timestamp, (long)file.Size);
-
-                        Console.WriteLine($"Debug: File {file.PathDisplay} - ServerModified: {serverTimestamp:yyyy-MM-dd HH:mm:ss}, " +
-                                         $"Parsed from filename: {(parsedTimestamp.HasValue ? parsedTimestamp.Value.ToString("yyyy-MM-dd HH:mm:ss") : "N/A")}, " +
-                                         $"Using: {timestamp:yyyy-MM-dd HH:mm:ss}");
-                    }
-                }
-                return files;
-            } catch (Exception ex) {
-                Console.WriteLine($"Error listing files in {remotePath}: {ex.Message}");
-                return files;
-            }
-        }
-
         public async Task UploadFileAsync(string localPath, string remotePath) {
             try {
                 var normalizedRemotePath = remotePath.Replace('\\', '/');
                 using var stream = new FileStream(localPath, FileMode.Open, FileAccess.Read);
-                var response = await _client.Files.UploadAsync(normalizedRemotePath, body: stream, mute: true);
-                Console.WriteLine($"Uploaded {localPath} to {normalizedRemotePath} (ServerModified: {response.ServerModified:yyyy-MM-dd HH:mm:ss})");
+                await _client.Files.UploadAsync(normalizedRemotePath, body: stream, mute: true);
+                Console.WriteLine($"Uploaded {localPath} to {normalizedRemotePath}");
             } catch (Exception ex) {
                 Console.WriteLine($"Error uploading {localPath} to {remotePath}: {ex.Message}");
             }
@@ -97,18 +60,11 @@ namespace GameSaveSync {
             try {
                 var normalizedRemotePath = remotePath.Replace('\\', '/');
                 using var response = await _client.Files.DownloadAsync(normalizedRemotePath);
-                var cloudFilename = Path.GetFileName(normalizedRemotePath);
-                var timestamp = response.Response.ServerModified.ToUniversalTime();
-                var originalFilename = SyncManager.StripTimestampFromFilename(cloudFilename);
-                var finalLocalPath = Path.Combine(Path.GetDirectoryName(localPath), originalFilename);
-
-                Directory.CreateDirectory(Path.GetDirectoryName(finalLocalPath));
+                Directory.CreateDirectory(Path.GetDirectoryName(localPath));
                 using var stream = await response.GetContentAsStreamAsync();
-                using var fileStream = new FileStream(finalLocalPath, FileMode.Create, FileAccess.Write);
+                using var fileStream = new FileStream(localPath, FileMode.Create, FileAccess.Write);
                 await stream.CopyToAsync(fileStream);
-                fileStream.Close();
-                File.SetLastWriteTimeUtc(finalLocalPath, timestamp);
-                Console.WriteLine($"Downloaded {normalizedRemotePath} to {finalLocalPath} (set timestamp: {timestamp:yyyy-MM-dd HH:mm:ss})");
+                Console.WriteLine($"Downloaded {normalizedRemotePath} to {localPath}");
             } catch (Exception ex) {
                 Console.WriteLine($"Error downloading {remotePath} to {localPath}: {ex.Message}");
             }
@@ -135,183 +91,166 @@ namespace GameSaveSync {
             }
         }
 
-        private static DateTime? ParseTimestampFromFilename(string filename) {
-            if (filename.Length > 19 && filename[8] == '_' && filename[15] == '_') {
-                var timestampPart = filename.Substring(0, 19); // yyyyMMdd_HHmmss_XXX
-                var timePart = timestampPart.Substring(0, 15); // yyyyMMdd_HHmmss
-                var tzPart = timestampPart.Substring(16);      // timezone (e.g., UTC, PST)
-
-                try {
-                    var timeZoneInfo = TimeZoneInfo.FindSystemTimeZoneById(
-                        tzPart switch {
-                            "UTC" => "UTC",
-                            "Pacific Standard Time" => "Pacific Standard Time",
-                            _ => TimeZoneInfo.Local.Id
-                        }
-                    );
-
-                    if (DateTime.TryParseExact(timePart, "yyyyMMdd_HHmmss", null,
-                        System.Globalization.DateTimeStyles.None, out var timestamp)) {
-                        return TimeZoneInfo.ConvertTimeToUtc(timestamp, timeZoneInfo);
-                    }
-                } catch (TimeZoneNotFoundException) {
-                    if (DateTime.TryParseExact(timePart, "yyyyMMdd_HHmmss", null,
-                        System.Globalization.DateTimeStyles.AssumeUniversal, out var timestamp)) {
-                        return timestamp;
+        public async Task<List<string>> ListFoldersAsync(string remotePath) {
+            var folders = new List<string>();
+            try {
+                var list = await _client.Files.ListFolderAsync(remotePath, recursive: false);
+                foreach (var entry in list.Entries.Where(e => e.IsFolder)) {
+                    folders.Add(entry.Name);
+                }
+                while (list.HasMore) {
+                    list = await _client.Files.ListFolderContinueAsync(list.Cursor);
+                    foreach (var entry in list.Entries.Where(e => e.IsFolder)) {
+                        folders.Add(entry.Name);
                     }
                 }
+            } catch (Exception ex) {
+                Console.WriteLine($"Error listing folders in {remotePath}: {ex.Message}");
             }
-            return null;
+            return folders;
+        }
+
+        public async Task<string> DownloadTextFileAsync(string remotePath) {
+            try {
+                using var response = await _client.Files.DownloadAsync(remotePath);
+                return await response.GetContentAsStringAsync();
+            } catch (ApiException<DownloadError> ex) when (ex.ErrorResponse.IsPath && ex.ErrorResponse.AsPath.Value.IsNotFound) {
+                return null;
+            } catch (Exception ex) {
+                Console.WriteLine($"Error downloading text file {remotePath}: {ex.Message}");
+                throw;
+            }
+        }
+
+        public async Task UploadTextFileAsync(string content, string remotePath) {
+            try {
+                using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(content));
+                await _client.Files.UploadAsync(remotePath, body: stream);
+                Console.WriteLine($"Uploaded text file to {remotePath}");
+            } catch (Exception ex) {
+                Console.WriteLine($"Error uploading text file to {remotePath}: {ex.Message}");
+            }
         }
     }
 
     public class SyncManager {
         private readonly ICloudStorageProvider _provider;
-        private int _totalFilesToSync;
-        private long _totalBytesToSync;
-        private int _filesSynced;
-        private long _bytesSynced;
 
         public SyncManager(ICloudStorageProvider provider) {
             _provider = provider;
-            _totalFilesToSync = 0;
-            _totalBytesToSync = 0;
-            _filesSynced = 0;
-            _bytesSynced = 0;
-        }
-
-        public static string StripTimestampFromFilename(string filename) {
-            // Count underscores and find the position of the third one
-            int underscoreCount = 0;
-            int thirdUnderscoreIndex = -1;
-
-            for (int i = 0; i < filename.Length; i++) {
-                if (filename[i] == '_') {
-                    underscoreCount++;
-                    if (underscoreCount == 3) {
-                        thirdUnderscoreIndex = i;
-                        break;
-                    }
-                }
-            }
-
-            // If we found 3 or more underscores and there's content after the third one
-            if (underscoreCount >= 3 && thirdUnderscoreIndex + 1 < filename.Length) {
-                return filename.Substring(thirdUnderscoreIndex + 1);
-            }
-
-            // Return original filename if conditions aren't met
-            return filename;
         }
 
         public async Task AnalyzeAndSyncAsync(List<SyncPair> pairs) {
-            var syncActions = new List<(string Action, string LocalPath, string RemotePath, long Size, string OldRemotePath)>();
             foreach (var pair in pairs) {
                 Directory.CreateDirectory(pair.LocalPath);
-                await _provider.CreateFolderAsync(pair.RemotePath);
-
-                var localFiles = Directory.EnumerateFiles(pair.LocalPath, "*", SearchOption.AllDirectories)
-                    .ToDictionary(
-                        f => f.Substring(pair.LocalPath.Length).TrimStart(Path.DirectorySeparatorChar).Replace('\\', '/'),
-                        f => (ModifiedTime: File.GetLastWriteTimeUtc(f), Size: new FileInfo(f).Length),
-                        StringComparer.OrdinalIgnoreCase);
-
-                var remoteFiles = await _provider.ListFilesAsync(pair.RemotePath);
-
-                foreach (var local in localFiles) {
-                    var localPath = Path.Combine(pair.LocalPath, local.Key.Replace('/', Path.DirectorySeparatorChar));
-                    var localTime = local.Value.ModifiedTime.TruncateToSeconds();
-                    var localTimeZone = TimeZoneInfo.Local.Id;
-                    var remoteFilename = $"{localTime:yyyyMMdd_HHmmss}_{localTimeZone}_{Path.GetFileName(local.Key)}";
-                    var relativeDir = Path.GetDirectoryName(local.Key);
-                    var remotePath = string.IsNullOrEmpty(relativeDir)
-                        ? $"{pair.RemotePath}/{remoteFilename}"
-                        : $"{pair.RemotePath}/{relativeDir}/{remoteFilename}";
-
-                    if (!string.IsNullOrEmpty(relativeDir)) {
-                        await _provider.CreateFolderAsync($"{pair.RemotePath}/{relativeDir}");
-                    }
-
-                    var matchingCloudFile = remoteFiles.Keys
-                        .FirstOrDefault(k => {
-                            var remoteDir = Path.GetDirectoryName(k) ?? "";
-                            var remoteFile = StripTimestampFromFilename(Path.GetFileName(k));
-                            var localDir = Path.GetDirectoryName(local.Key) ?? "";
-                            var localFile = Path.GetFileName(local.Key);
-                            var match = remoteDir.Equals(localDir, StringComparison.OrdinalIgnoreCase) &&
-                                        remoteFile.Equals(localFile, StringComparison.OrdinalIgnoreCase);
-                            if (!match && remoteDir == localDir)
-                                Console.WriteLine($"Debug: No match for {local.Key} with cloud {k} (filename mismatch: {remoteFile} vs {localFile})");
-                            return match;
-                        });
-
-                    if (matchingCloudFile == null) {
-                        syncActions.Add(("Upload", localPath, remotePath, local.Value.Size, null));
-                        Console.WriteLine($"Will upload {local.Key} (missing in cloud)");
-                    } else {
-                        var remoteTime = remoteFiles[matchingCloudFile].ModifiedTime.TruncateToSeconds();
-                        Console.WriteLine($"Debug: Comparing {local.Key} - Local: {localTime:yyyy-MM-dd HH:mm:ss} ({localTimeZone}), Remote: {remoteTime:yyyy-MM-dd HH:mm:ss} (UTC)");
-                        if (localTime > remoteTime) {
-                            syncActions.Add(("Upload", localPath, remotePath, local.Value.Size, $"{pair.RemotePath}/{matchingCloudFile}"));
-                            Console.WriteLine($"Will upload {local.Key} (local newer: {localTime} ({localTimeZone}) vs cloud {remoteTime} (UTC)) and delete old cloud file");
-                        } else if (remoteTime > localTime) {
-                            syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{matchingCloudFile}", remoteFiles[matchingCloudFile].Size, null));
-                            Console.WriteLine($"Will download {local.Key} (cloud newer: {remoteTime} (UTC) vs local {localTime} ({localTimeZone}))");
-                        } else {
-                            Console.WriteLine($"Skipping {local.Key} (timestamps match: {localTime})");
-                        }
-                    }
-                }
-
-                foreach (var remote in remoteFiles) {
-                    var originalFilename = StripTimestampFromFilename(remote.Key);
-                    var relativePath = Path.Combine(Path.GetDirectoryName(remote.Key) ?? "", originalFilename).Replace('/', Path.DirectorySeparatorChar);
-                    var localPath = Path.Combine(pair.LocalPath, relativePath);
-                    var remoteTime = remote.Value.ModifiedTime.TruncateToSeconds();
-
-                    if (!localFiles.ContainsKey(relativePath.Replace(Path.DirectorySeparatorChar, '/'))) {
-                        syncActions.Add(("Download", localPath, $"{pair.RemotePath}/{remote.Key}", remote.Value.Size, null));
-                        Console.WriteLine($"Will download {relativePath} (missing locally, cloud timestamp: {remoteTime} UTC)");
-                    }
-                }
-            }
-
-            _totalFilesToSync = syncActions.Count;
-            _totalBytesToSync = syncActions.Sum(a => a.Size);
-            double totalMB = _totalBytesToSync / (1024.0 * 1024.0);
-
-            Console.WriteLine($"Sync Analysis Complete:");
-            Console.WriteLine($"Total Files to Sync: {_totalFilesToSync}");
-            Console.WriteLine($"Total Size to Sync: {totalMB:F2} MB");
-            Console.WriteLine();
-
-            foreach (var action in syncActions) {
-                if (action.Action == "Upload") {
-                    if (!string.IsNullOrEmpty(action.OldRemotePath)) {
-                        await _provider.DeleteFileAsync(action.OldRemotePath);
-                    }
-                    await _provider.UploadFileAsync(action.LocalPath, action.RemotePath);
-                } else if (action.Action == "Download") {
-                    await _provider.DownloadFileAsync(action.RemotePath, action.LocalPath);
-                }
-
-                _filesSynced++;
-                _bytesSynced += action.Size;
-
-                double filePercent = (_filesSynced / (double)_totalFilesToSync) * 100;
-                double bytesMB = _bytesSynced / (1024.0 * 1024.0);
-                double bytesPercent = (_bytesSynced / (double)_totalBytesToSync) * 100;
-
-                Console.WriteLine($"Progress: {_filesSynced}/{_totalFilesToSync} files synced ({filePercent:F1}%)");
-                Console.WriteLine($"Data: {bytesMB:F2}/{totalMB:F2} MB synced ({bytesPercent:F1}%)");
-                Console.WriteLine();
+                await SyncDirectoryAsync(pair.LocalPath, pair.RemotePath);
             }
         }
-    }
 
-    public static class DateTimeExtensions {
-        public static DateTime TruncateToSeconds(this DateTime dt) {
-            return new DateTime(dt.Ticks - (dt.Ticks % TimeSpan.TicksPerSecond), dt.Kind);
+        private async Task SyncDirectoryAsync(string localDir, string remoteDir) {
+            // Ensure remote directory exists
+            await _provider.CreateFolderAsync(remoteDir);
+
+            // Download and parse metadata
+            var cloudFiles = await DownloadAndParseMetadataAsync(remoteDir);
+
+            // Get local files
+            var localFiles = Directory.GetFiles(localDir).ToDictionary(
+                Path.GetFileName,
+                f => File.GetLastWriteTimeUtc(f)
+            );
+
+            // Get local subdirectories
+            var localSubDirs = Directory.GetDirectories(localDir).Select(Path.GetFileName).ToList();
+
+            // List cloud subdirectories
+            var cloudSubDirs = await _provider.ListFoldersAsync(remoteDir);
+
+            // Sync files
+            var finalTimestamps = new Dictionary<string, DateTime>();
+            var localOffset = TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow);
+
+            // Handle local files
+            foreach (var file in localFiles.Keys) {
+                var localUtcTime = localFiles[file];
+                var localTime = localUtcTime + localOffset; // Convert UTC to local time for comparison
+
+                if (cloudFiles.TryGetValue(file, out var cloudUtcTime)) {
+                    var cloudLocalTime = cloudUtcTime + localOffset; // Convert cloud UTC to local time
+
+                    if (localTime > cloudLocalTime) {
+                        // Local file is newer, upload it
+                        await _provider.UploadFileAsync(Path.Combine(localDir, file), $"{remoteDir}/{file}");
+                        finalTimestamps[file] = localUtcTime; // Store UTC time in metadata
+                        Console.WriteLine($"Uploaded {file}: local {localTime} > cloud {cloudLocalTime}");
+                    } else if (cloudLocalTime > localTime) {
+                        // Cloud file is newer, download it
+                        await _provider.DownloadFileAsync($"{remoteDir}/{file}", Path.Combine(localDir, file));
+                        File.SetLastWriteTimeUtc(Path.Combine(localDir, file), cloudUtcTime);
+                        finalTimestamps[file] = cloudUtcTime;
+                        Console.WriteLine($"Downloaded {file}: cloud {cloudLocalTime} > local {localTime}");
+                    } else {
+                        // Timestamps equal, no action needed
+                        finalTimestamps[file] = localUtcTime; // Could use cloudUtcTime, as they're equivalent in UTC
+                        Console.WriteLine($"Skipped {file}: local {localTime} = cloud {cloudLocalTime}");
+                    }
+                } else {
+                    // File not in cloud, upload it
+                    await _provider.UploadFileAsync(Path.Combine(localDir, file), $"{remoteDir}/{file}");
+                    finalTimestamps[file] = localUtcTime;
+                    Console.WriteLine($"Uploaded {file}: not found in cloud");
+                }
+            }
+
+            // Handle cloud files not present locally
+            foreach (var file in cloudFiles.Keys.Except(localFiles.Keys)) {
+                var localPath = Path.Combine(localDir, file);
+                await _provider.DownloadFileAsync($"{remoteDir}/{file}", localPath);
+                File.SetLastWriteTimeUtc(localPath, cloudFiles[file]);
+                finalTimestamps[file] = cloudFiles[file];
+                Console.WriteLine($"Downloaded {file}: not found locally");
+            }
+
+            // Upload updated metadata
+            await UploadMetadataAsync(remoteDir, finalTimestamps);
+
+            // Sync subdirectories
+            foreach (var subDir in localSubDirs) {
+                var localSubDirPath = Path.Combine(localDir, subDir);
+                var remoteSubDirPath = $"{remoteDir}/{subDir}";
+                await SyncDirectoryAsync(localSubDirPath, remoteSubDirPath);
+            }
+
+            // Handle cloud subdirectories not present locally
+            foreach (var subDir in cloudSubDirs.Except(localSubDirs)) {
+                var localSubDirPath = Path.Combine(localDir, subDir);
+                Directory.CreateDirectory(localSubDirPath);
+                var remoteSubDirPath = $"{remoteDir}/{subDir}";
+                await SyncDirectoryAsync(localSubDirPath, remoteSubDirPath);
+            }
+        }
+
+        private async Task<Dictionary<string, DateTime>> DownloadAndParseMetadataAsync(string remoteDir) {
+            var metadataPath = $"{remoteDir}/file_sync_metadata.txt";
+            var content = await _provider.DownloadTextFileAsync(metadataPath);
+            if (string.IsNullOrEmpty(content))
+                return new Dictionary<string, DateTime>();
+
+            var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+            var dict = new Dictionary<string, DateTime>();
+            foreach (var line in lines) {
+                var parts = line.Split('\t');
+                if (parts.Length == 2 && DateTime.TryParse(parts[1], out var dt)) {
+                    dict[parts[0]] = dt; // UTC time from metadata
+                }
+            }
+            return dict;
+        }
+
+        private async Task UploadMetadataAsync(string remoteDir, Dictionary<string, DateTime> timestamps) {
+            var content = string.Join("\n", timestamps.Select(kv => $"{kv.Key}\t{kv.Value.ToString("o")}"));
+            var metadataPath = $"{remoteDir}/file_sync_metadata.txt";
+            await _provider.UploadTextFileAsync(content, metadataPath);
         }
     }
 
