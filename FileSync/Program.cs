@@ -8,6 +8,7 @@ using Dropbox.Api;
 using Dropbox.Api.Files;
 
 namespace GameSaveSync {
+    // Configuration class to hold sync pairs and cloud provider details
     public class Config {
         public List<SyncPair> SyncPairs { get; set; } = new List<SyncPair>();
         public string CloudProvider { get; set; } = string.Empty;
@@ -17,11 +18,13 @@ namespace GameSaveSync {
         public string AppSecret { get; set; } = string.Empty;
     }
 
+    // Represents a pair of local and remote paths to sync
     public class SyncPair {
         public string LocalPath { get; set; } = string.Empty;
         public string RemotePath { get; set; } = string.Empty;
     }
 
+    // Interface for cloud storage operations
     public interface ICloudStorageProvider {
         Task UploadFileAsync(string localPath, string remotePath);
         Task DownloadFileAsync(string remotePath, string localPath);
@@ -32,6 +35,7 @@ namespace GameSaveSync {
         Task UploadTextFileAsync(string content, string remotePath);
     }
 
+    // Dropbox implementation of the cloud storage provider
     public class DropboxStorageProvider : ICloudStorageProvider {
         private readonly DropboxClient _client;
 
@@ -93,7 +97,8 @@ namespace GameSaveSync {
 
         public async Task<List<string>> ListFoldersAsync(string remotePath) {
             var folders = new List<string>();
-            try {
+            try
+            {
                 var list = await _client.Files.ListFolderAsync(remotePath, recursive: false);
                 foreach (var entry in list.Entries.Where(e => e.IsFolder)) {
                     folders.Add(entry.Name);
@@ -104,7 +109,8 @@ namespace GameSaveSync {
                         folders.Add(entry.Name);
                     }
                 }
-            } catch (Exception ex) {
+            }
+            catch (Exception ex) {
                 Console.WriteLine($"Error listing folders in {remotePath}: {ex.Message}");
             }
             return folders;
@@ -133,6 +139,7 @@ namespace GameSaveSync {
         }
     }
 
+    // Manages synchronization between local and cloud storage
     public class SyncManager {
         private readonly ICloudStorageProvider _provider;
 
@@ -240,8 +247,9 @@ namespace GameSaveSync {
             var dict = new Dictionary<string, DateTime>();
             foreach (var line in lines) {
                 var parts = line.Split('\t');
-                if (parts.Length == 2 && DateTime.TryParse(parts[1], out var dt)) {
-                    dict[parts[0]] = dt; // UTC time from metadata
+                if (parts.Length == 2 &&
+                    DateTime.TryParseExact(parts[1], "O", null, System.Globalization.DateTimeStyles.RoundtripKind, out var dt)) {
+                    dict[parts[0]] = dt; // Stores UTC time if 'Z' is present
                 }
             }
             return dict;
@@ -254,6 +262,7 @@ namespace GameSaveSync {
         }
     }
 
+    // Main program entry point
     class Program {
         static async Task Main(string[] args) {
             try {
