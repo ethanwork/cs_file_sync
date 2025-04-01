@@ -97,8 +97,7 @@ namespace GameSaveSync {
 
         public async Task<List<string>> ListFoldersAsync(string remotePath) {
             var folders = new List<string>();
-            try
-            {
+            try {
                 var list = await _client.Files.ListFolderAsync(remotePath, recursive: false);
                 foreach (var entry in list.Entries.Where(e => e.IsFolder)) {
                     folders.Add(entry.Name);
@@ -109,8 +108,7 @@ namespace GameSaveSync {
                         folders.Add(entry.Name);
                     }
                 }
-            }
-            catch (Exception ex) {
+            } catch (Exception ex) {
                 Console.WriteLine($"Error listing folders in {remotePath}: {ex.Message}");
             }
             return folders;
@@ -159,13 +157,14 @@ namespace GameSaveSync {
             // Ensure remote directory exists
             await _provider.CreateFolderAsync(remoteDir);
 
-            // Download and parse metadata
+            // Download and parse metadata with case-insensitive dictionary
             var cloudFiles = await DownloadAndParseMetadataAsync(remoteDir);
 
-            // Get local files
+            // Get local files with case-insensitive dictionary
             var localFiles = Directory.GetFiles(localDir).ToDictionary(
                 Path.GetFileName,
-                f => File.GetLastWriteTimeUtc(f)
+                f => File.GetLastWriteTimeUtc(f),
+                StringComparer.OrdinalIgnoreCase
             );
 
             // Get local subdirectories
@@ -200,7 +199,6 @@ namespace GameSaveSync {
                     } else {
                         // Timestamps equal, no action needed
                         finalTimestamps[file] = localUtcTime; // Could use cloudUtcTime, as they're equivalent in UTC
-                        //Console.WriteLine($"Skipped {file}: local {localTime} = cloud {cloudLocalTime}");
                     }
                 } else {
                     // File not in cloud, upload it
@@ -210,8 +208,8 @@ namespace GameSaveSync {
                 }
             }
 
-            // Handle cloud files not present locally
-            foreach (var file in cloudFiles.Keys.Except(localFiles.Keys)) {
+            // Handle cloud files not present locally with case-insensitive comparison
+            foreach (var file in cloudFiles.Keys.Except(localFiles.Keys, StringComparer.OrdinalIgnoreCase)) {
                 var localPath = Path.Combine(localDir, file);
                 await _provider.DownloadFileAsync($"{remoteDir}/{file}", localPath);
                 File.SetLastWriteTimeUtc(localPath, cloudFiles[file]);
@@ -229,8 +227,8 @@ namespace GameSaveSync {
                 await SyncDirectoryAsync(localSubDirPath, remoteSubDirPath);
             }
 
-            // Handle cloud subdirectories not present locally
-            foreach (var subDir in cloudSubDirs.Except(localSubDirs)) {
+            // Handle cloud subdirectories not present locally with case-insensitive comparison
+            foreach (var subDir in cloudSubDirs.Except(localSubDirs, StringComparer.OrdinalIgnoreCase)) {
                 var localSubDirPath = Path.Combine(localDir, subDir);
                 Directory.CreateDirectory(localSubDirPath);
                 var remoteSubDirPath = $"{remoteDir}/{subDir}";
@@ -242,10 +240,10 @@ namespace GameSaveSync {
             var metadataPath = $"{remoteDir}/file_sync_metadata.txt";
             var content = await _provider.DownloadTextFileAsync(metadataPath);
             if (string.IsNullOrEmpty(content))
-                return new Dictionary<string, DateTime>();
+                return new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
 
             var lines = content.Split('\n', StringSplitOptions.RemoveEmptyEntries);
-            var dict = new Dictionary<string, DateTime>();
+            var dict = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
             foreach (var line in lines) {
                 var parts = line.Split('\t');
                 if (parts.Length == 2 &&
