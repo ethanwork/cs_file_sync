@@ -131,6 +131,7 @@ namespace GameSaveSync {
         public async Task UploadTextFileAsync(string content, string remotePath) {
             try {
                 using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(content));
+                await _client.Files.DeleteV2Async(remotePath);
                 await _client.Files.UploadAsync(remotePath, body: stream);
                 Console.WriteLine($"Uploaded text file to {remotePath}");
             } catch (Exception ex) {
@@ -199,7 +200,7 @@ namespace GameSaveSync {
                     } else {
                         // Timestamps equal, no action needed
                         finalTimestamps[file] = localUtcTime; // Could use cloudUtcTime, as they're equivalent in UTC
-                        Console.WriteLine($"Skipped {file}: local {localTime} = cloud {cloudLocalTime}");
+                        //Console.WriteLine($"Skipped {file}: local {localTime} = cloud {cloudLocalTime}");
                     }
                 } else {
                     // File not in cloud, upload it
