@@ -129,8 +129,7 @@ namespace GameSaveSync {
         public async Task UploadTextFileAsync(string content, string remotePath) {
             try {
                 using var stream = new MemoryStream(System.Text.Encoding.UTF8.GetBytes(content));
-                await _client.Files.DeleteV2Async(remotePath);
-                await _client.Files.UploadAsync(remotePath, body: stream);
+                await _client.Files.UploadAsync(remotePath, body: stream, mode: WriteMode.Overwrite.Instance);
                 Console.WriteLine($"Uploaded text file to {remotePath}");
             } catch (Exception ex) {
                 Console.WriteLine($"Error uploading text file to {remotePath}: {ex.Message}");
@@ -157,7 +156,7 @@ namespace GameSaveSync {
             // Ensure remote directory exists
             await _provider.CreateFolderAsync(remoteDir);
 
-            // Download and parse metadata with case-insensitive dictionary
+            // Download and parse existing metadata with case-insensitive dictionary
             var cloudFiles = await DownloadAndParseMetadataAsync(remoteDir);
 
             // Get local files with case-insensitive dictionary
@@ -174,7 +173,7 @@ namespace GameSaveSync {
             var cloudSubDirs = await _provider.ListFoldersAsync(remoteDir);
 
             // Sync files
-            var finalTimestamps = new Dictionary<string, DateTime>();
+            var finalTimestamps = new Dictionary<string, DateTime>(StringComparer.OrdinalIgnoreCase);
             var localOffset = TimeZoneInfo.Local.GetUtcOffset(DateTime.UtcNow);
 
             // Handle local files
@@ -217,8 +216,12 @@ namespace GameSaveSync {
                 Console.WriteLine($"Downloaded {file}: not found locally");
             }
 
-            // Upload updated metadata
-            await UploadMetadataAsync(remoteDir, finalTimestamps);
+            // Upload metadata only if it has changed
+            if (!AreDictionariesEqual(finalTimestamps, cloudFiles)) {
+                await UploadMetadataAsync(remoteDir, finalTimestamps);
+            } else {
+                Console.WriteLine("Metadata unchanged, skipping upload.");
+            }
 
             // Sync subdirectories
             foreach (var subDir in localSubDirs) {
@@ -255,9 +258,20 @@ namespace GameSaveSync {
         }
 
         private async Task UploadMetadataAsync(string remoteDir, Dictionary<string, DateTime> timestamps) {
-            var content = string.Join("\n", timestamps.Select(kv => $"{kv.Key}\t{kv.Value.ToString("o")}"));
+            var sortedTimestamps = timestamps.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase);
+            var content = string.Join("\n", sortedTimestamps.Select(kv => $"{kv.Key}\t{kv.Value.ToString("o")}"));
             var metadataPath = $"{remoteDir}/file_sync_metadata.txt";
             await _provider.UploadTextFileAsync(content, metadataPath);
+        }
+
+        private bool AreDictionariesEqual(Dictionary<string, DateTime> dict1, Dictionary<string, DateTime> dict2) {
+            if (dict1.Count != dict2.Count) return false;
+            foreach (var kvp in dict1) {
+                if (!dict2.TryGetValue(kvp.Key, out var value) || value != kvp.Value) {
+                    return false;
+                }
+            }
+            return true;
         }
     }
 
