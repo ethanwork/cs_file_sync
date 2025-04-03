@@ -54,7 +54,7 @@ Example config.json
 {
   "syncPairs": [
     {
-      "localPath": "E:\\GOG Galaxy\\Games\\HoMM 3 Complete\\Games",
+      "localPath": "C:\\GOG Games\\HoMM 3 Complete\\Games",
       "remotePath": "/GameSaves/HoMM3"
     },
     {
@@ -62,14 +62,22 @@ Example config.json
       "remotePath": "/GameSaves/HoMM2"
     },
     {
+      "localPath": "C:\\RetroArch-Win64\\config",
+      "remotePath": "/GameSaves/RetroArch/config"
+    },	
+    {
+      "localPath": "C:\\RetroArch-Win64\\states",
+      "remotePath": "/GameSaves/RetroArch/states"
+    },	
+    {
       "localPath": "C:\\RetroArch-Win64\\saves",
-      "remotePath": "/GameSaves/RetroArch"
+      "remotePath": "/GameSaves/RetroArch/saves"
     }
   ],
   "cloudProvider": "Dropbox",
-  "credentials": "temp token here",
-  "refreshToken": "refresh token here",
-  "appKey": "app key here",
-  "appSecret": "app secret here"
+  "credentials": "token here",
+"refreshToken": "refresh token here",
+"appKey": "key here",
+"appSecret": "secret here"
 }
 ```
